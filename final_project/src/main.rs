@@ -44,9 +44,37 @@ struct CompletetionRecord {
 }
 
 // Chosen Workload Config
-
+#[derive(Debug, Clone, Copy)]
+struct WorkloadConfig {
+    num_tasks: u64,
+    seed: u64,
+    cpu_fraaction: f64,
+    cpu_dur_min: u64,
+    io_dur_min: u64,
+    burst_mode: bool,
+    max_arrival_gap_ms: u64,
+}
 
 // Threadpool
+
+enum Message {
+    NewJob(Job),
+    Terminate,
+}
+
+type  Job = Box<dyn fnOnce(usize) + Send + 'static>;
+
+struct Threadpool {
+
+    workers: Vec<Worker>,
+    sender: mpsc::Sender<Message>,
+    queued_jobs: Arc<AtomicUsize>,
+}
+
+impl Threadpool{
+    
+}
+
 
 
 
