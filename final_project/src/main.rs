@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 // The Task Model
 
-#[derive(Debug, Clone, Copy, PartialEq, EQ)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskKind {
     Cpu,
     Io,
 }
 
-#{derive{Debug, Clone}]
+#[derive(Debug, Clone)]
 struct Task {
     id: u64,
     kind: TaskKind,
@@ -74,7 +74,7 @@ struct ThreadPool {
 }
 
 impl ThreadPool{
-    fn new(size: usize) -> Threadpool {
+    fn new(size: usize) -> ThreadPool {
         assert!(size > 0);
 
 
@@ -132,7 +132,7 @@ impl ThreadPool{
 
     struct Worker {
         id:usize,
-        hread: Option<thread::JoinHandle<()>>,
+        thread: Option<thread::JoinHandle<()>>,
     }
 
     impl Worker {
@@ -218,20 +218,207 @@ fn generate_tasks(cfg: WorkloadConfig, tx: mpsc::Sender<Task>) {
 }
 
 // Dispatcher
-
-// Metrics and Printing
-
-// Running one Experiment 
-
-
-
-fn main() {
-    println!("Hello, world!");
-
-// Experiment A
-
-
-
-// Experiment B
-
+fn run_dispatcher(
+    task_rx: mpsc::Receiver<Task>,
+    pool: Arc<ThreadPool>,
+    done_tx: mpsc::Sender<CompletionRecord>,
+    submitted_count: Arc<AtomicU64>,
+) {
+    for mut task in task_rx {
+        task.dispatch_time = Some(Instant::now());
+        submitted_count.fetch_add(1, Ordering::SeqCst);
+ 
+        let done_tx = done_tx.clone();
+ 
+        pool.execute(move |worker_id| {
+            let start = Instant::now();
+            let dispatch_time = task.dispatch_time.unwrap_or(task.arrival_time);
+            let wait_ms = start.duration_since(dispatch_time).as_millis() as u64;
+ 
+            match task.kind {
+                TaskKind::Cpu => simulate_cpu_work(task.duration_ms),
+                TaskKind::Io => thread::sleep(Duration::from_millis(task.duration_ms)),
+            }
+ 
+            let finish = Instant::now();
+            let turnaround_ms = finish.duration_since(task.arrival_time).as_millis() as u64;
+ 
+            let rec = CompletionRecord {
+                id: task.id,
+                wait_ms,
+                turnaround_ms,
+                worker_id,
+            };
+ 
+            let _ = done_tx.send(rec);
+        });
+    }
 }
+ 
+ 
+// Metrics and Printing
+ 
+fn print_summary(
+    label: &str,
+    completions: &[CompletionRecord],
+    worker_busy_ms: &[u64],
+    makespan_ms: u64,
+    last_finished_task_id: Option<u64>,
+) {
+    let total = completions.len();
+    let num_workers = worker_busy_ms.len();
+ 
+    let avg_wait = if total > 0 {
+        completions.iter().map(|r| r.wait_ms).sum::<u64>() / total as u64
+    } else {
+        0
+    };
+ 
+    let avg_turn = if total > 0 {
+        completions
+            .iter()
+            .map(|r| r.turnaround_ms)
+            .sum::<u64>()
+            / total as u64
+    } else {
+        0
+    };
+ 
+    let max_wait = completions.iter().map(|r| r.wait_ms).max().unwrap_or(0);
+ 
+    println!();
+    println!("---------------------------------------------------------");
+    println!(" RESULTS: {:<46}|", label);
+    println!("---------------------------------------------------------");
+    println!("  Total tasks completed : {:>6}                       ", total);
+    println!(
+        "  Last task finished    : {:>6}                       ",
+        last_finished_task_id.unwrap_or(0)
+    );
+    println!("|  Makespan              : {:>6} ms                     |", makespan_ms);
+    println!("|  Avg wait time         : {:>6} ms                     |", avg_wait);
+    println!("|  Avg turnaround time   : {:>6} ms                     |", avg_turn);
+    println!("|  Max wait time         : {:>6} ms                     |", max_wait);
+    println!("|  Worker utilization:                                   |");
+ 
+    for i in 0..num_workers {
+        let pct = if makespan_ms > 0 {
+            worker_busy_ms[i] * 100 / makespan_ms
+        } else {
+            0
+        };
+ 
+        println!(
+            "|    Worker {:>2}  : {:>3}%                                   |",
+            i, pct
+        );
+    }
+ 
+    println!("---------------------------------------------------------");
+}
+ 
+// Running one Experiment
+ 
+fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
+    println!();
+    println!("▶  Starting: {}", label);
+    println!(
+        "   Tasks: {}  |  Workers: {}  |  CPU fraction: {:.0}%  |  Burst: {}",
+        cfg.num_tasks,
+        num_workers,
+        cfg.cpu_fraction * 100.0,
+        cfg.burst_mode
+    );
+ 
+    let pool = Arc::new(ThreadPool::new(num_workers));
+ 
+    let (task_tx, task_rx) = mpsc::channel::<Task>();
+    let (done_tx, done_rx) = mpsc::channel::<CompletionRecord>();
+ 
+    let submitted_count = Arc::new(AtomicU64::new(0));
+ 
+    let dispatcher_handle = {
+        let pool = Arc::clone(&pool);
+        let done_tx = done_tx.clone();
+        let submitted = Arc::clone(&submitted_count);
+        thread::spawn(move || run_dispatcher(task_rx, pool, done_tx, submitted))
+    };
+ 
+    let generator_handle = thread::spawn(move || generate_tasks(cfg, task_tx));
+ 
+    let wall_start = Instant::now();
+ 
+    generator_handle.join().unwrap();
+    dispatcher_handle.join().unwrap();
+ 
+    drop(done_tx);
+ 
+    let expected = submitted_count.load(Ordering::SeqCst);
+    let mut completions = Vec::with_capacity(expected as usize);
+    let mut worker_busy_ms = vec![0u64; pool.size()];
+    let mut last_finished_task_id = None;
+ 
+    for _ in 0..expected {
+        let rec = done_rx.recv().unwrap();
+        worker_busy_ms[rec.worker_id] += rec.turnaround_ms.saturating_sub(rec.wait_ms);
+        last_finished_task_id = Some(rec.id);
+        completions.push(rec);
+    }
+ 
+    let makespan_ms = wall_start.elapsed().as_millis() as u64;
+ 
+    print_summary(
+        label,
+        &completions,
+        &worker_busy_ms,
+        makespan_ms,
+        last_finished_task_id,
+    );
+}
+ 
+ 
+fn main() {
+    println!("--------------------------------------------------------");
+    println!("  Final Project : Concurrent Task Dispatcher");
+    println!("  Architecture  : Central Dispatcher");
+    println!("  Policy        : FIFO");
+    println!("  Workers       : 8");
+    println!("--------------------------------------------------------");
+ 
+    // Experiment A
+    run_experiment(
+        "A: Balanced Workload",
+        WorkloadConfig {
+            num_tasks: 500,
+            seed: 42,
+            cpu_fraction: 0.50,
+            cpu_dur_min: 5,
+            cpu_dur_max: 30,
+            io_dur_min: 10,
+            io_dur_max: 40,
+            burst_mode: false,
+            max_arrival_gap_ms: 3,
+        },
+        8,
+    );
+ 
+    // Experiment B
+    run_experiment(
+        "B: Stressed Workload",
+        WorkloadConfig {
+            num_tasks: 600,
+            seed: 99,
+            cpu_fraction: 0.80,
+            cpu_dur_min: 5,
+            cpu_dur_max: 80,
+            io_dur_min: 2,
+            io_dur_max: 10,
+            burst_mode: true,
+            max_arrival_gap_ms: 30,
+        },
+        8,
+    );
+ 
+    println!("All experiments complete.");
+}
+ 
