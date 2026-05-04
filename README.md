@@ -58,5 +58,5 @@ The dispatcher coordinates task assignment while worker threads process tasks co
 The system ensures safe concurrent execution while maintaining the selected scheduling policy.
 
 ---
-
-Will be updated with tools used once started.
+## Tools Disclosure
+Claude.ai was used.
