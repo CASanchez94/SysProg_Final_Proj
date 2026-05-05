@@ -69,7 +69,7 @@ type Job = Box<dyn FnOnce(usize) + Send + 'static>;
 struct ThreadPool {
 
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Message>,
+    sender: mpsc::SyncSender<Message>, // ✅ change this
     queued_jobs: Arc<AtomicUsize>,
 }
 
@@ -78,7 +78,7 @@ impl ThreadPool{
         assert!(size > 0);
 
 
-        let (sender, receiver) = mpsc::channel::<Message>();
+        let (sender, receiver) = mpsc::sync_channel(100);
         let receiver = Arc::new(Mutex::new(receiver));
         let queued_jobs = Arc::new(AtomicUsize::new(0));
 
@@ -225,37 +225,35 @@ fn run_dispatcher(
     submitted_count: Arc<AtomicU64>,
 ) {
     for mut task in task_rx {
-        task.dispatch_time = Some(Instant::now());
-        submitted_count.fetch_add(1, Ordering::SeqCst);
- 
-        let done_tx = done_tx.clone();
- 
-        pool.execute(move |worker_id| {
-            let start = Instant::now();
-            let dispatch_time = task.dispatch_time.unwrap_or(task.arrival_time);
-            let wait_ms = start.duration_since(dispatch_time).as_millis() as u64;
- 
-            match task.kind {
-                TaskKind::Cpu => simulate_cpu_work(task.duration_ms),
-                TaskKind::Io => thread::sleep(Duration::from_millis(task.duration_ms)),
-            }
- 
-            let finish = Instant::now();
-            let turnaround_ms = finish.duration_since(task.arrival_time).as_millis() as u64;
- 
-            let rec = CompletionRecord {
-                id: task.id,
-                wait_ms,
-                turnaround_ms,
-                worker_id,
-            };
- 
-            let _ = done_tx.send(rec);
-        });
-    }
+    task.dispatch_time = Some(Instant::now());
+    submitted_count.fetch_add(1, Ordering::SeqCst);
+
+    let done_tx = done_tx.clone();
+
+    pool.execute(move |worker_id| {
+        let start = Instant::now();
+        let dispatch_time = task.dispatch_time.unwrap_or(task.arrival_time);
+        let wait_ms = start.duration_since(dispatch_time).as_millis() as u64;
+
+        match task.kind {
+            TaskKind::Cpu => simulate_cpu_work(task.duration_ms),
+            TaskKind::Io => thread::sleep(Duration::from_millis(task.duration_ms)),
+        }
+
+        let finish = Instant::now();
+        let turnaround_ms = finish.duration_since(task.arrival_time).as_millis() as u64;
+
+        let rec = CompletionRecord {
+            id: task.id,
+            wait_ms,
+            turnaround_ms,
+            worker_id,
+        };
+
+        let _ = done_tx.send(rec);
+    });
 }
- 
- 
+}
 // Metrics and Printing
  
 fn print_summary(
@@ -360,7 +358,7 @@ fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
  
     for _ in 0..expected {
         let rec = done_rx.recv().unwrap();
-        worker_busy_ms[rec.worker_id] += rec.turnaround_ms.saturating_sub(rec.wait_ms);
+        worker_busy_ms[rec.worker_id] += rec.turnaround_ms - rec.wait_ms;
         last_finished_task_id = Some(rec.id);
         completions.push(rec);
     }
