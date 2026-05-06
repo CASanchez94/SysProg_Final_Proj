@@ -47,7 +47,7 @@ Example output:
   CPU tasks completed    : 299
   IO tasks completed     : 701
   Makespan               : 39165 ms
-  Avg wait time          : 0 ms
+  Avg wait time          : 9125 ms
   Avg turnaround time    : 9328 ms
 ---------------------------------------------------------
   Monitor (sampled every 10ms):
@@ -79,7 +79,7 @@ Arrival gap: 20ms | Seed: 42
   CPU tasks completed    : 299
   IO tasks completed     : 701
   Makespan               : 39165 ms
-  Avg wait time          : 0 ms
+  Avg wait time          : 9125 ms
   Avg turnaround time    : 9328 ms
 ---------------------------------------------------------
   Monitor (sampled every 10ms):
@@ -104,7 +104,7 @@ Arrival gap: 20ms | Seed: 42
   CPU tasks completed    : 299
   IO tasks completed     : 701
   Makespan               : 41784 ms
-  Avg wait time          : 0 ms
+  Avg wait time          : 5402 ms
   Avg turnaround time    : 5557 ms
 ---------------------------------------------------------
   Monitor (sampled every 10ms):

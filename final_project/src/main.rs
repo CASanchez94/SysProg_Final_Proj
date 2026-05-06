@@ -459,7 +459,7 @@ fn main() {
 
         // Experiment B - Optimized, 70/30 IO/CPU
     run_experiment(
-        "B: Optimized, 70% IO / 30% CPU",
+        ": Optimized, 70% IO / 30% CPU",
         WorkloadConfig {
             num_tasks: 1000,
             seed: 42,
