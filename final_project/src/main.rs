@@ -41,6 +41,7 @@ struct CompletionRecord {
     wait_ms: u64,
     turnaround_ms: u64,
     worker_id: usize,
+    duration_ms: u64,
 }
 
 // Chosen Workload Config
@@ -71,6 +72,7 @@ struct ThreadPool {
     workers: Vec<Worker>,
     sender: mpsc::SyncSender<Message>, 
     queued_jobs: Arc<AtomicUsize>,
+    active_workers: Arc<AtomicUsize>,
 }
 
 impl ThreadPool{
@@ -81,6 +83,7 @@ impl ThreadPool{
         let (sender, receiver) = mpsc::sync_channel(100);
         let receiver = Arc::new(Mutex::new(receiver));
         let queued_jobs = Arc::new(AtomicUsize::new(0));
+        let active_workers = Arc::new(AtomicUsize::new(0));
 
         let mut workers = Vec::with_capacity(size);
         for id in 0..size {
@@ -88,6 +91,7 @@ impl ThreadPool{
                 id,
                 Arc::clone(&receiver),
                 Arc::clone(&queued_jobs),
+                Arc::clone(&active_workers),
 
             ));
         }
@@ -95,7 +99,8 @@ impl ThreadPool{
         ThreadPool {
             workers,
             sender,
-            queued_jobs
+            queued_jobs,
+            active_workers,
         }
     }
     
@@ -140,6 +145,7 @@ impl ThreadPool{
         id: usize,
         receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
         queued_jobs: Arc<AtomicUsize>,
+        active_workers: Arc<AtomicUsize>,
     ) -> Worker {
         let thread = thread::spawn(move || loop {
             let message = receiver.lock().unwrap().recv().unwrap();
@@ -147,7 +153,10 @@ impl ThreadPool{
             match message {
                 Message::NewJob(job) => {
                     queued_jobs.fetch_sub(1, Ordering::SeqCst);
+                    active_workers.fetch_add(1, Ordering::SeqCst);
                     job(id);
+                    active_workers.fetch_sub(1, Ordering::SeqCst);
+                    
                 }
                 Message::Terminate => {
                     break;
@@ -246,6 +255,7 @@ fn run_dispatcher(
             id: task.id,
             wait_ms,
             turnaround_ms,
+            duration_ms: task.duration_ms,
             worker_id,
         };
 
@@ -261,9 +271,10 @@ fn print_summary(
     worker_busy_ms: &[u64],
     makespan_ms: u64,
     last_finished_task_id: Option<u64>,
+    peak_available: usize,
+    num_workers: usize,
 ) {
     let total = completions.len();
-    let num_workers = worker_busy_ms.len();
  
     let avg_wait = if total > 0 {
         completions.iter().map(|r| r.wait_ms).sum::<u64>() / total as u64
@@ -296,6 +307,7 @@ fn print_summary(
     println!("|  Avg wait time         : {:>6} ms                     |", avg_wait);
     println!("|  Avg turnaround time   : {:>6} ms                     |", avg_turn);
     println!("|  Max wait time         : {:>6} ms                     |", max_wait);
+    println!("|  Min available workers : {:>6} / {}                   |", peak_available, num_workers);
     println!("|  Worker utilization:                                   |");
  
     for i in 0..num_workers {
@@ -334,6 +346,24 @@ fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
  
     let submitted_count = Arc::new(AtomicU64::new(0));
  
+    let active_workers_ref = Arc::clone(&pool.active_workers);
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let monitor_handle = thread::spawn(move || {
+        let mut min_available = num_workers;
+        loop {
+            let active = active_workers_ref.load(Ordering::SeqCst);
+            let available = num_workers.saturating_sub(active);
+            if available < min_available {
+                min_available = available;
+            }
+            if stop_rx.try_recv().is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        min_available
+    });
+
     let dispatcher_handle = {
         let pool = Arc::clone(&pool);
         let done_tx = done_tx.clone();
@@ -347,6 +377,10 @@ fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
  
     generator_handle.join().unwrap();
     dispatcher_handle.join().unwrap();
+
+    let _ = stop_tx.send(());
+    let peak_available = monitor_handle.join().unwrap();
+
  
     drop(done_tx);
  
@@ -357,7 +391,7 @@ fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
  
     for _ in 0..expected {
         let rec = done_rx.recv().unwrap();
-        worker_busy_ms[rec.worker_id] += rec.turnaround_ms - rec.wait_ms;
+        worker_busy_ms[rec.worker_id] += rec.duration_ms;
         last_finished_task_id = Some(rec.id);
         completions.push(rec);
     }
@@ -370,6 +404,8 @@ fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
         &worker_busy_ms,
         makespan_ms,
         last_finished_task_id,
+        peak_available,
+        num_workers,
     );
 }
  
@@ -406,12 +442,12 @@ fn main() {
             num_tasks: 600,
             seed: 99,
             cpu_fraction: 0.80,
-            cpu_dur_min: 5,
+            cpu_dur_min: 20,
             cpu_dur_max: 80,
             io_dur_min: 2,
             io_dur_max: 10,
             burst_mode: true,
-            max_arrival_gap_ms: 30,
+            max_arrival_gap_ms: 20,
         },
         8,
     );
