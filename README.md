@@ -126,13 +126,7 @@ Arrival gap: 20ms | Seed: 42
 | Peak CPU usage | 100% | 100% | — |
 | Avg active workers | 5.1 / 8 | 4.8 / 8 | −5.9% |
 
-Both schedulers completed all 1000 tasks with zero wait time, meaning tasks were dispatched
-as fast as they arrived in both cases. The key difference shows up in avg turnaround: the
-optimized scheduler reduced it by 40.4% (9328ms → 5557ms) by prioritizing CPU tasks first
-and packing the CPU budget greedily, so individual tasks spent less time in the system overall.
-The tradeoff is a slightly longer makespan (+6.7%) — the optimized scheduler was more
-conservative about which tasks to run simultaneously, leaving workers idle when no task fit
-the remaining CPU budget cleanly, while FIFO just sent whatever was next regardless.
+FIFO produced a shorter makespan by 6.7%, meaning it finished all 1000 tasks faster overall. This is because the workload is IO-dominated at 70%, so the CPU cap rarely becomes a bottleneck and FIFO's simple send-the-next-task approach keeps workers busy without hesitation. The Optimized policy is more conservative — it pauses to check headroom before dispatching, which occasionally leaves workers idle when FIFO would have just sent the next IO task immediately. However the Optimized policy reduced average wait time by 40.8% and average turnaround by 40.4%, meaning individual tasks spent significantly less time in the system. The trade-off is clear: FIFO wins on total runtime for IO-heavy workloads, while the Optimized packing strategy would show its advantage on CPU-heavy workloads where the 100% cap is frequently hit and smarter dispatch decisions matter more.
 
 
 ---
