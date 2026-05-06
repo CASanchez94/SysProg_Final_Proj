@@ -107,5 +107,21 @@ bottleneck rather than the dispatcher.
 
 ---
 ## Tools Disclosure
-Claude.ai was used to make a change in my Dispatcher to make it more inline with the grading criteria.
-Claude was also used to make a more refined README which includes the Design Summary and Experiment Summary.
+
+**Tools used:** Claude.ai (claude.ai)
+
+**Kind of help provided:** Claude was used to review code correctness,
+check whether the project met grading requirements, and suggest fixes
+for bugs and warnings encountered during development.
+
+**Example of advice accepted:** Claude identified that the worker
+utilization calculation was inflated because it used `turnaround_ms -
+wait_ms` instead of the task's actual `duration_ms`. Accepting this fix
+brought utilization values into a realistic range.
+
+**Example of advice rejected or fixed:** Claude suggested removing the
+`id` field from the `Worker` struct entirely to resolve a dead_code
+warning. This would have broken the code because `id` is passed into
+`job(id)` inside the worker thread closure. The fix applied instead was
+`#[allow(dead_code)]` on the field, which silences the warning without
+breaking anything.
