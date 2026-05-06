@@ -85,7 +85,7 @@ impl SharedState {
  
 fn worker_thread(
     id: usize,
-    task_rx: Arc<Mutex<mpsc::Receiver<(Task, Instant)>>>,
+    task_rx: Arc<Mutex<mpsc::Receiver<Task>>>,
     done_tx: mpsc::Sender<CompletionRecord>,
     state: Arc<Mutex<SharedState>>,
     release_tx: mpsc::Sender<()>,
@@ -98,9 +98,9 @@ fn worker_thread(
  
         match msg {
             Err(_) => break, 
-            Ok((task, dispatched_at)) => {
+            Ok(task) => {
                 let exec_start = Instant::now();
-                let wait_ms = exec_start.duration_since(dispatched_at).as_millis() as u64;
+                let wait_ms = exec_start.duration_since(task.arrival_time).as_millis() as u64;
  
               
                 match task.kind {
@@ -112,7 +112,7 @@ fn worker_thread(
                     .duration_since(task.arrival_time)
                     .as_millis() as u64;
  
-                // release our slot in shared state
+               
                 {
                     let mut s = state.lock().unwrap();
                     s.active_workers -= 1;
@@ -173,8 +173,8 @@ fn generate_tasks(cfg: WorkloadConfig, tx: mpsc::Sender<Task>) {
 
  
 fn run_manager_fifo(
-    task_rx: mpsc::Receiver<Task>,
-    worker_tx: mpsc::SyncSender<(Task, Instant)>,
+    task_rx:     mpsc::Receiver<Task>,
+    worker_tx:   mpsc::SyncSender<Task>,
     state: Arc<Mutex<SharedState>>,
     release_rx: mpsc::Receiver<()>,
     num_workers: usize,
@@ -214,7 +214,7 @@ fn run_manager_fifo(
                 s.queue_len -= 1;
             }
             *submitted.lock().unwrap() += 1;
-            let _ = worker_tx.send((task, Instant::now()));
+            let _ = worker_tx.send(task);
             sent_one = true;
         }
  
@@ -229,8 +229,8 @@ fn run_manager_fifo(
 
  
 fn run_manager_optimized(
-    task_rx: mpsc::Receiver<Task>,
-    worker_tx: mpsc::SyncSender<(Task, Instant)>,
+    task_rx:     mpsc::Receiver<Task>,
+    worker_tx:   mpsc::SyncSender<Task>,
     state: Arc<Mutex<SharedState>>,
     release_rx: mpsc::Receiver<()>,
     num_workers: usize,
@@ -282,7 +282,7 @@ fn run_manager_optimized(
                         s.queue_len -= 1;
                     }
                     *submitted.lock().unwrap() += 1;
-                    let _ = worker_tx.send((t, Instant::now()));
+                    let _ = worker_tx.send(t);
                     sent_one = true;
                 }
             }
@@ -389,7 +389,7 @@ fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize, optimize
     let (task_tx,    task_rx)    = mpsc::channel::<Task>();
     let (done_tx,    done_rx)    = mpsc::channel::<CompletionRecord>();
     let (release_tx, release_rx) = mpsc::channel::<()>();
-    let (worker_tx,  worker_rx)  = mpsc::sync_channel::<(Task, Instant)>(32);
+    let (worker_tx,  worker_rx)  = mpsc::sync_channel::<Task>(32);
  
     let worker_rx = Arc::new(Mutex::new(worker_rx));
  
