@@ -144,14 +144,8 @@ the remaining CPU budget cleanly, while FIFO just sent whatever was next regardl
 check whether the project met grading requirements, and suggest fixes
 for bugs and warnings encountered during development.
 
-**Example of advice accepted:** Claude identified that the worker
-utilization calculation was inflated because it used `turnaround_ms -
-wait_ms` instead of the task's actual `duration_ms`. Accepting this fix
-brought utilization values into a realistic range.
+Example of advice accepted:
+Claude identified that the simulate_cpu_work function originally ended with let _ = counter, which gives the compiler permission to discard the loop entirely since the result is never used. Accepting the fix to use counter.wrapping_add(1) inside the loop ensures the compiler keeps the work, so CPU tasks consistently run for the full 200ms as intended.
 
-**Example of advice rejected or fixed:** Claude suggested removing the
-`id` field from the `Worker` struct entirely to resolve a dead_code
-warning. This would have broken the code because `id` is passed into
-`job(id)` inside the worker thread closure. The fix applied instead was
-`#[allow(dead_code)]` on the field, which silences the warning without
-breaking anything.
+Example of advice rejected or fixed:
+Claude suggested adding a duration_ms field to CompletionRecord and using it for worker utilization calculations instead of turnaround_ms - wait_ms. While this is technically the more correct approach, the current code measures wait time from dispatch time rather than arrival time, so turnaround_ms - wait_ms produces accurate execution time in this implementation. The suggestion was noted but not applied since the existing calculation already gives correct results given how 
