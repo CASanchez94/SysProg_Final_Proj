@@ -40,19 +40,21 @@ cargo run
 ```
 Example output:
 ```text
-Final Project : Concurrent Task Dispatcher
-  Architecture  : Central Dispatcher
-  Policy        : FIFO - Simple, Fair, Starvation Free
-  Workers       : 8
-
-Starting: A: Balanced Workload
-   Tasks: 500  |  Workers: 8  |  CPU fraction: 50%  |  Burst: false
-
-  Total tasks completed :    500
-  Makespan              :   1430 ms
-  Avg wait time         :    148 ms
-  Avg turnaround time   :    173 ms
-  Max wait time         :    316 ms
+---------------------------------------------------------
+ RESULTS: A: FIFO, 70% IO / 30% CPU
+---------------------------------------------------------
+  Total tasks completed  : 1000
+  CPU tasks completed    : 299
+  IO tasks completed     : 701
+  Makespan               : 39165 ms
+  Avg wait time          : 0 ms
+  Avg turnaround time    : 9328 ms
+---------------------------------------------------------
+  Monitor (sampled every 10ms):
+  Avg CPU usage          : 89.4%
+  Peak CPU usage         : 100%
+  Avg active workers     : 5.1 / 8
+---------------------------------------------------------
 ```
 ---
 
@@ -85,97 +87,76 @@ dispatcher, and guarantees that no task is skipped in favor of another.
 
 # Experiment Summary
 ---
-
-### Experiment A: Balanced Workload
-
----
-
-## Appendix — Experiment Output
-
-### Experiment A: Balanced Workload
+### Experiment A: FIFO, 70% IO / 30% CPU
 
 **Configuration:**
-- Tasks: 500 | Workers: 8 | CPU fraction: 50% | Burst: false
-- CPU duration: 5–30 ms | IO duration: 10–40 ms
-- Arrival gap: 0–3 ms | Seed: 42
+Tasks: 1000 | Workers: 8 | IO fraction: 70% | Scheduler: FIFO
+IO task: sleep(200ms), 10% CPU cost | CPU task: spin(200ms), 35% CPU cost
+Arrival gap: 20ms | Seed: 42
 
 ```text
 ---------------------------------------------------------
- RESULTS: A: Balanced Workload
+ RESULTS: A: FIFO, 70% IO / 30% CPU
 ---------------------------------------------------------
-|  Total tasks completed :    500                       |
-|  Last task finished    :    494                       |
-|  Makespan              :   1401 ms                     |
-|  Avg wait time         :    119 ms                     |
-|  Avg turnaround time   :    141 ms                     |
-|  Max wait time         :    294 ms                     |
-|  Min available workers :      0 / 8                   |
-|  Worker utilization:                                   |
-|    Worker  0  :  94%                                   |
-|    Worker  1  :  95%                                   |
-|    Worker  2  :  93%                                   |
-|    Worker  3  :  94%                                   |
-|    Worker  4  :  92%                                   |
-|    Worker  5  :  93%                                   |
-|    Worker  6  :  93%                                   |
-|    Worker  7  :  93%                                   |
+  Total tasks completed  : 1000
+  CPU tasks completed    : 299
+  IO tasks completed     : 701
+  Makespan               : 39165 ms
+  Avg wait time          : 0 ms
+  Avg turnaround time    : 9328 ms
+---------------------------------------------------------
+  Monitor (sampled every 10ms):
+  Avg CPU usage          : 89.4%
+  Peak CPU usage         : 100%
+  Avg active workers     : 5.1 / 8
 ---------------------------------------------------------
 ```
 
----
-
-### Experiment B: Stressed Workload
+### Experiment B: Optimized, 70% IO / 30% CPU
 
 **Configuration:**
-- Tasks: 600 | Workers: 8 | CPU fraction: 80% | Burst: true
-- CPU duration: 20–80 ms | IO duration: 2–10 ms
-- Arrival gap: 0–20 ms | Seed: 99
+Tasks: 1000 | Workers: 8 | IO fraction: 70% | Scheduler: Optimized
+IO task: sleep(200ms), 10% CPU cost | CPU task: spin(200ms), 35% CPU cost
+Arrival gap: 20ms | Seed: 42
 
 ```text
 ---------------------------------------------------------
- RESULTS: B: Stressed Workload
+ RESULTS: B: Optimized, 70% IO / 30% CPU
 ---------------------------------------------------------
-|  Total tasks completed :    600                       |
-|  Last task finished    :    599                       |
-|  Makespan              :   3472 ms                     |
-|  Avg wait time         :    455 ms                     |
-|  Avg turnaround time   :    763 ms                     |
-|  Max wait time         :    692 ms                     |
-|  Min available workers :      0 / 8                   |
-|  Worker utilization:                                   |
-|    Worker  0  :  91%                                   |
-|    Worker  1  :  90%                                   |
-|    Worker  2  :  90%                                   |
-|    Worker  3  :  90%                                   |
-|    Worker  4  :  91%                                   |
-|    Worker  5  :  90%                                   |
-|    Worker  6  :  90%                                   |
-|    Worker  7  :  91%                                   |
+  Total tasks completed  : 1000
+  CPU tasks completed    : 299
+  IO tasks completed     : 701
+  Makespan               : 41784 ms
+  Avg wait time          : 0 ms
+  Avg turnaround time    : 5557 ms
+---------------------------------------------------------
+  Monitor (sampled every 10ms):
+  Avg CPU usage          : 83.7%
+  Peak CPU usage         : 100%
+  Avg active workers     : 4.8 / 8
 ---------------------------------------------------------
 ```
-
----
 
 ### Comparison
 
-| Metric | Experiment A | Experiment B | Change |
+| Metric | Exp A (FIFO) | Exp B (Optimized) | Change |
 |---|---|---|---|
-| Tasks | 500 | 600 | +20% |
-| Makespan | 1401 ms | 3472 ms | +148% |
-| Avg wait time | 119 ms | 455 ms | +282% |
-| Avg turnaround | 141 ms | 763 ms | +441% |
-| Max wait time | 294 ms | 692 ms | +135% |
-| Avg utilization | ~93% | ~90% | −3% |
+| Tasks | 1000 | 1000 | — |
+| Makespan | 39165 ms | 41784 ms | +6.7% |
+| Avg wait time | 0 ms | 0 ms | — |
+| Avg turnaround | 9328 ms | 5557 ms | −40.4% |
+| Avg CPU usage | 89.4% | 83.7% | −5.7% |
+| Peak CPU usage | 100% | 100% | — |
+| Avg active workers | 5.1 / 8 | 4.8 / 8 | −5.9% |
 
-Experiment B took 148% longer to complete despite only 20% more tasks.
-The shift to 80% CPU-heavy tasks with longer durations (20–80 ms) and
-burst arrivals caused avg wait to rise nearly 4x and avg turnaround to
-rise over 5x compared to Experiment A. FIFO's head-of-line blocking is
-the primary cause — short IO tasks of 2–10 ms were forced to wait behind
-CPU tasks ahead of them with no ability to skip forward. Worker
-utilization stayed near-identical in both experiments (~90–95%),
-confirming the workers were never idle — the bottleneck was task ordering,
-not pool capacity.
+Both schedulers completed all 1000 tasks with zero wait time, meaning tasks were dispatched
+as fast as they arrived in both cases. The key difference shows up in avg turnaround: the
+optimized scheduler reduced it by 40.4% (9328ms → 5557ms) by prioritizing CPU tasks first
+and packing the CPU budget greedily, so individual tasks spent less time in the system overall.
+The tradeoff is a slightly longer makespan (+6.7%) — the optimized scheduler was more
+conservative about which tasks to run simultaneously, leaving workers idle when no task fit
+the remaining CPU budget cleanly, while FIFO just sent whatever was next regardless.
+
 
 ---
 ## Tools Disclosure
