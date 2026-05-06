@@ -69,7 +69,7 @@ type Job = Box<dyn FnOnce(usize) + Send + 'static>;
 struct ThreadPool {
 
     workers: Vec<Worker>,
-    sender: mpsc::SyncSender<Message>, // ✅ change this
+    sender: mpsc::SyncSender<Message>, 
     queued_jobs: Arc<AtomicUsize>,
 }
 
@@ -121,7 +121,6 @@ impl ThreadPool{
             }
 
             for worker in &mut self.workers {
-                println!("Shutting down worker {}", worker.id);
 
                 if let Some(thread) = worker.thread.take(){
                     thread.join().unwrap();
@@ -131,6 +130,7 @@ impl ThreadPool{
     }
 
     struct Worker {
+        #[allow(dead_code)]
         id:usize,
         thread: Option<thread::JoinHandle<()>>,
     }
@@ -150,7 +150,6 @@ impl ThreadPool{
                     job(id);
                 }
                 Message::Terminate => {
-                    println!("Worker {} is terminating.", id);
                     break;
                 }
             }
@@ -379,7 +378,7 @@ fn main() {
     println!("--------------------------------------------------------");
     println!("  Final Project : Concurrent Task Dispatcher");
     println!("  Architecture  : Central Dispatcher");
-    println!("  Policy        : FIFO");
+    println!("  Policy        : FIFO - Simple, Fair, Starvation Free");
     println!("  Workers       : 8");
     println!("--------------------------------------------------------");
  
