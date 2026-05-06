@@ -60,30 +60,7 @@ Example output:
 
 ## Design Summary
 
-This project implements a concurrent task dispatcher using a central dispatcher
-architecture with four major components.
-The generator thread creates tasks using a fixed random seed, assigns each
-one a kind (CPU or IO), a duration, and an arrival timestamp, and sends them
-one at a time over an unbounded mpsc channel with a configurable inter-arrival
-gap.
-The dispatcher thread receives tasks from the generator channel, stamps
-each with a dispatch time, and forwards jobs to the thread pool. It exits
-automatically when the generator channel closes.
-The thread pool holds eight worker threads, each pulling from a shared
-bounded sync_channel (capacity 100). CPU tasks are simulated with a busy
-counter loop; IO tasks use thread::sleep. Each worker sends a CompletionRecord
-back to the main thread on finish.
-The main thread joins the generator and dispatcher, drains the completion
-channel for exactly as many records as a shared AtomicU64 submitted counter
-reports, and prints the summary.
-Shared state is minimal. The pool's receiver is wrapped in
-Arc<Mutex<Receiver<Message>>> so all eight workers compete for the same
-queue; the Mutex is held only during recv, not during execution. The submitted
-count is an Arc<AtomicU64> shared between the dispatcher and main thread.
-The scheduling policy is FIFO. Tasks pass through two ordered channels in
-arrival order with no reordering or prioritization. FIFO was chosen because it
-matches the channel architecture naturally, requires no decision logic in the
-dispatcher, and guarantees that no task is skipped in favor of another.
+This project implements a concurrent task dispatcher using a central manager architecture with five major components. The generator thread creates tasks using a fixed random seed, assigns each one a kind (CPU or IO) and an arrival timestamp, and sends them one at a time over an unbounded mpsc channel with a fixed 20ms inter-arrival gap. The manager runs on the main experiment thread, holds tasks in an internal Vec queue, and makes the dispatch decision for each task before it reaches a worker. Before dispatching, the manager checks two things: whether a free worker is available and whether the task's CPU cost would push the global cpu_pct over 100 percent. If either check fails the task stays in the queue until a worker finishes and sends a release signal. Eight worker threads share a bounded sync_channel with capacity 32. CPU tasks are simulated with a busy counter loop and IO tasks use thread::sleep, both for 200ms. Each worker decrements the shared state when it finishes and sends a CompletionRecord back to the main thread. A monitor thread runs independently, sampling active worker count and CPU percentage every 10ms into a log that is used to compute averages at the end. Shared state is managed through a single Arc<Mutex<SharedState>> struct containing active_workers, cpu_pct, and queue_len. A separate Arc<Mutex<u64>> submitted counter tracks how many tasks the manager has dispatched so the main thread knows exactly how many completion records to collect. Two scheduling policies are implemented. FIFO holds all tasks in a single Vec and always dispatches from the front, preserving strict arrival order. The Optimized policy splits tasks into separate CPU and IO queues and fills available CPU headroom greedily — preferring CPU tasks when at least 35 percent is free and falling back to IO tasks when headroom is tighter. This keeps more workers busy simultaneously at the cost of strict arrival-order fairness.
 
 # Experiment Summary
 ---
@@ -167,14 +144,8 @@ the remaining CPU budget cleanly, while FIFO just sent whatever was next regardl
 check whether the project met grading requirements, and suggest fixes
 for bugs and warnings encountered during development.
 
-**Example of advice accepted:** Claude identified that the worker
-utilization calculation was inflated because it used `turnaround_ms -
-wait_ms` instead of the task's actual `duration_ms`. Accepting this fix
-brought utilization values into a realistic range.
+Example of advice accepted:
+Claude identified that the simulate_cpu_work function originally ended with let _ = counter, which gives the compiler permission to discard the loop entirely since the result is never used. Accepting the fix to use counter.wrapping_add(1) inside the loop ensures the compiler keeps the work, so CPU tasks consistently run for the full 200ms as intended.
 
-**Example of advice rejected or fixed:** Claude suggested removing the
-`id` field from the `Worker` struct entirely to resolve a dead_code
-warning. This would have broken the code because `id` is passed into
-`job(id)` inside the worker thread closure. The fix applied instead was
-`#[allow(dead_code)]` on the field, which silences the warning without
-breaking anything.
+Example of advice rejected or fixed:
+Claude suggested adding a duration_ms field to CompletionRecord and using it for worker utilization calculations instead of turnaround_ms - wait_ms. While this is technically the more correct approach, the current code measures wait time from dispatch time rather than arrival time, so turnaround_ms - wait_ms produces accurate execution time in this implementation. The suggestion was noted but not applied since the existing calculation already gives correct results given how 
