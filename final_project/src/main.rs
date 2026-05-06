@@ -1,457 +1,475 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, mpsc, Arc, Mutex,};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-
-
+ 
+ 
 // The Task Model
-
+ 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskKind {
     Cpu,
     Io,
 }
-
+ 
 #[derive(Debug, Clone)]
 struct Task {
     id: u64,
     kind: TaskKind,
-    duration_ms: u64,
     arrival_time: Instant,
+    #[allow(dead_code)]
     dispatch_time: Option<Instant>,
 }
-
-impl Task{
-    fn new(id: u64, kind: TaskKind, duration_ms: u64, arrival_time: Instant) -> Self{
+ 
+impl Task {
+    fn new(id: u64, kind: TaskKind) -> Self {
         Task {
             id,
             kind,
-            duration_ms,
-            arrival_time: arrival_time,
+            arrival_time: Instant::now(),
             dispatch_time: None,
         }
     }
+ 
+    
+    fn cpu_cost(&self) -> f64 {
+        match self.kind {
+            TaskKind::Cpu => 35.0,
+            TaskKind::Io  => 10.0,
+        }
+    }
 }
-
-// Record of Completetion
-
+ 
+ 
+// Record of Completion
+ 
 #[derive(Debug)]
 struct CompletionRecord {
+    #[allow(dead_code)]
     id: u64,
+    kind: TaskKind,
     wait_ms: u64,
     turnaround_ms: u64,
+    #[allow(dead_code)]
     worker_id: usize,
-    duration_ms: u64,
 }
-
-// Chosen Workload Config
+ 
+ 
+// Workload Config
+ 
 #[derive(Debug, Clone, Copy)]
 struct WorkloadConfig {
     num_tasks: u64,
     seed: u64,
-    cpu_fraction: f64,
-    cpu_dur_min: u64,
-    cpu_dur_max: u64,
-    io_dur_min: u64,
-    io_dur_max: u64,
-    burst_mode: bool,
-    max_arrival_gap_ms: u64,
+    io_fraction: f64,
+    arrival_gap_ms: u64,   
 }
-
-// Threadpool
-
-enum Message {
-    NewJob(Job),
-    Terminate,
+ 
+ 
+// Shared State 
+ 
+struct SharedState {
+    active_workers: usize,
+    cpu_pct: f64,       
+    queue_len: usize,   
 }
-
-type Job = Box<dyn FnOnce(usize) + Send + 'static>;
-
-struct ThreadPool {
-
-    workers: Vec<Worker>,
-    sender: mpsc::SyncSender<Message>, 
-    queued_jobs: Arc<AtomicUsize>,
-    active_workers: Arc<AtomicUsize>,
-}
-
-impl ThreadPool{
-    fn new(size: usize) -> ThreadPool {
-        assert!(size > 0);
-
-
-        let (sender, receiver) = mpsc::sync_channel(100);
-        let receiver = Arc::new(Mutex::new(receiver));
-        let queued_jobs = Arc::new(AtomicUsize::new(0));
-        let active_workers = Arc::new(AtomicUsize::new(0));
-
-        let mut workers = Vec::with_capacity(size);
-        for id in 0..size {
-            workers.push(Worker::new(
-                id,
-                Arc::clone(&receiver),
-                Arc::clone(&queued_jobs),
-                Arc::clone(&active_workers),
-
-            ));
-        }
-
-        ThreadPool {
-            workers,
-            sender,
-            queued_jobs,
-            active_workers,
-        }
+ 
+impl SharedState {
+    fn new() -> Self {
+        SharedState { active_workers: 0, cpu_pct: 0.0, queue_len: 0 }
     }
-    
-    fn execute<F>(&self, f: F)
-    where
-        F: FnOnce(usize) + Send + 'static, 
-        {
-            let job = Box::new(f);
-            self.queued_jobs.fetch_add(1, Ordering::SeqCst);
-            self.sender.send(Message::NewJob(job)).unwrap();
-        }
-
-        fn size(&self) -> usize {
-            self.workers.len()
-        }
-    }
-
-    impl Drop for ThreadPool {
-
-        fn drop(&mut self) {
-            for _ in &self.workers {
-                self.sender.send(Message::Terminate).unwrap();
-            }
-
-            for worker in &mut self.workers {
-
-                if let Some(thread) = worker.thread.take(){
-                    thread.join().unwrap();
+}
+ 
+ 
+// Workers
+ 
+fn worker_thread(
+    id: usize,
+    task_rx: Arc<Mutex<mpsc::Receiver<(Task, Instant)>>>,
+    done_tx: mpsc::Sender<CompletionRecord>,
+    state: Arc<Mutex<SharedState>>,
+    release_tx: mpsc::Sender<()>,
+) {
+    loop {
+        let msg = {
+            let rx = task_rx.lock().unwrap();
+            rx.recv()
+        };
+ 
+        match msg {
+            Err(_) => break, 
+            Ok((task, dispatched_at)) => {
+                let exec_start = Instant::now();
+                let wait_ms = exec_start.duration_since(dispatched_at).as_millis() as u64;
+ 
+              
+                match task.kind {
+                    TaskKind::Io  => thread::sleep(Duration::from_millis(200)),
+                    TaskKind::Cpu => simulate_cpu_work(200),
                 }
+ 
+                let turnaround_ms = Instant::now()
+                    .duration_since(task.arrival_time)
+                    .as_millis() as u64;
+ 
+                // release our slot in shared state
+                {
+                    let mut s = state.lock().unwrap();
+                    s.active_workers -= 1;
+                    s.cpu_pct -= task.cpu_cost();
+                    if s.cpu_pct < 0.0 { s.cpu_pct = 0.0; }
+                }
+ 
+                let _ = release_tx.send(());
+ 
+                let _ = done_tx.send(CompletionRecord {
+                    id: task.id,
+                    kind: task.kind,
+                    wait_ms,
+                    turnaround_ms,
+                    worker_id: id,
+                });
             }
         }
     }
-
-    struct Worker {
-        #[allow(dead_code)]
-        id:usize,
-        thread: Option<thread::JoinHandle<()>>,
-    }
-
-    impl Worker {
-    fn new(
-        id: usize,
-        receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
-        queued_jobs: Arc<AtomicUsize>,
-        active_workers: Arc<AtomicUsize>,
-    ) -> Worker {
-        let thread = thread::spawn(move || loop {
-            let message = receiver.lock().unwrap().recv().unwrap();
-
-            match message {
-                Message::NewJob(job) => {
-                    queued_jobs.fetch_sub(1, Ordering::SeqCst);
-                    active_workers.fetch_add(1, Ordering::SeqCst);
-                    job(id);
-                    active_workers.fetch_sub(1, Ordering::SeqCst);
-                    
-                }
-                Message::Terminate => {
-                    break;
-                }
-            }
-        });
-
-        Worker {
-            id,
-            thread: Some(thread),
-        }
-    }
 }
-
+ 
+ 
 // Simulated Behavior
-
+ 
 fn simulate_cpu_work(duration_ms: u64) {
     let start = Instant::now();
     let mut counter: u64 = 0;
-
     while start.elapsed().as_millis() < duration_ms as u128 {
-        counter += 1;
+        counter = counter.wrapping_add(1);
     }
-
-    if counter == 0 {
-        panic!("Counter should not be at 0");
-    }
-
+    let _ = counter;
 }
-// Task Gen
+ 
+ 
+// Task Generator
+ 
 fn generate_tasks(cfg: WorkloadConfig, tx: mpsc::Sender<Task>) {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
-
-    for i in 0 ..cfg.num_tasks {
-        let kind = if rng.r#gen::<f64>() < cfg.cpu_fraction {
-            TaskKind::Cpu
-        } else {
+ 
+    for i in 0..cfg.num_tasks {
+        let kind = if rng.r#gen::<f64>() < cfg.io_fraction {
             TaskKind::Io
+        } else {
+            TaskKind::Cpu
         };
-
-        let duration_ms = match kind {
-            TaskKind::Cpu => rng.gen_range(cfg.cpu_dur_min..= cfg.cpu_dur_max),
-            TaskKind::Io => rng.gen_range(cfg.io_dur_min..=cfg.io_dur_max),
-        };
-
-        let task = Task::new(i, kind, duration_ms, Instant::now());
-
+ 
+        let task = Task::new(i, kind);
+ 
         if tx.send(task).is_err() {
             break;
         }
-
-        let gap = if cfg.burst_mode {
-            if i % 20 == 19 {
-                rng.gen_range(20..=cfg.max_arrival_gap_ms)
-            } else {
-                rng.gen_range(0..=2)
-            }
-        } else {
-            rng.gen_range(0..=cfg.max_arrival_gap_ms)
-        };
-
-        if gap > 0 {
-            thread::sleep(Duration::from_millis(gap));
-        }
-     }
-    
+ 
+        thread::sleep(Duration::from_millis(cfg.arrival_gap_ms));
+    }
 }
+ 
+ 
 
-// Dispatcher
-fn run_dispatcher(
+ 
+fn run_manager_fifo(
     task_rx: mpsc::Receiver<Task>,
-    pool: Arc<ThreadPool>,
-    done_tx: mpsc::Sender<CompletionRecord>,
-    submitted_count: Arc<AtomicU64>,
+    worker_tx: mpsc::SyncSender<(Task, Instant)>,
+    state: Arc<Mutex<SharedState>>,
+    release_rx: mpsc::Receiver<()>,
+    num_workers: usize,
+    submitted: Arc<Mutex<u64>>,
 ) {
-    for mut task in task_rx {
-    task.dispatch_time = Some(Instant::now());
-    submitted_count.fetch_add(1, Ordering::SeqCst);
-
-    let done_tx = done_tx.clone();
-
-    pool.execute(move |worker_id| {
-        let start = Instant::now();
-        let dispatch_time = task.dispatch_time.unwrap_or(task.arrival_time);
-        let wait_ms = start.duration_since(dispatch_time).as_millis() as u64;
-
-        match task.kind {
-            TaskKind::Cpu => simulate_cpu_work(task.duration_ms),
-            TaskKind::Io => thread::sleep(Duration::from_millis(task.duration_ms)),
+    let mut waiting: Vec<Task> = Vec::new();
+    let mut gen_done = false;
+ 
+    loop {
+       
+        loop {
+            match task_rx.try_recv() {
+                Ok(t) => {
+                    state.lock().unwrap().queue_len += 1;
+                    waiting.push(t);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => { gen_done = true; break; }
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
         }
-
-        let finish = Instant::now();
-        let turnaround_ms = finish.duration_since(task.arrival_time).as_millis() as u64;
-
-        let rec = CompletionRecord {
-            id: task.id,
-            wait_ms,
-            turnaround_ms,
-            duration_ms: task.duration_ms,
-            worker_id,
-        };
-
-        let _ = done_tx.send(rec);
-    });
+ 
+       
+        let mut sent_one = false;
+        while !waiting.is_empty() {
+            let cpu_needed = waiting[0].cpu_cost();
+            let can_go = {
+                let s = state.lock().unwrap();
+                s.active_workers < num_workers && s.cpu_pct + cpu_needed <= 100.0
+            };
+            if !can_go { break; }
+ 
+            let task = waiting.remove(0);
+            {
+                let mut s = state.lock().unwrap();
+                s.active_workers += 1;
+                s.cpu_pct += task.cpu_cost();
+                s.queue_len -= 1;
+            }
+            *submitted.lock().unwrap() += 1;
+            let _ = worker_tx.send((task, Instant::now()));
+            sent_one = true;
+        }
+ 
+        if gen_done && waiting.is_empty() { break; }
+        if !sent_one {
+          
+            let _ = release_rx.recv_timeout(Duration::from_millis(5));
+        }
+    }
 }
+ 
+
+ 
+fn run_manager_optimized(
+    task_rx: mpsc::Receiver<Task>,
+    worker_tx: mpsc::SyncSender<(Task, Instant)>,
+    state: Arc<Mutex<SharedState>>,
+    release_rx: mpsc::Receiver<()>,
+    num_workers: usize,
+    submitted: Arc<Mutex<u64>>,
+) {
+    let mut io_queue:  Vec<Task> = Vec::new();
+    let mut cpu_queue: Vec<Task> = Vec::new();
+    let mut gen_done = false;
+ 
+    loop {
+        loop {
+            match task_rx.try_recv() {
+                Ok(t) => {
+                    state.lock().unwrap().queue_len += 1;
+                    match t.kind {
+                        TaskKind::Io  => io_queue.push(t),
+                        TaskKind::Cpu => cpu_queue.push(t),
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => { gen_done = true; break; }
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
+        }
+ 
+        let mut sent_one = false;
+        loop {
+            let (free_workers, free_cpu) = {
+                let s = state.lock().unwrap();
+                (num_workers - s.active_workers, 100.0 - s.cpu_pct)
+            };
+            if free_workers == 0 || free_cpu < 10.0 { break; }
+ 
+            
+            let task = if !cpu_queue.is_empty() && free_cpu >= 35.0 {
+                Some(cpu_queue.remove(0))
+            } else if !io_queue.is_empty() && free_cpu >= 10.0 {
+                Some(io_queue.remove(0))
+            } else {
+                None
+            };
+ 
+            match task {
+                None => break,
+                Some(t) => {
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.active_workers += 1;
+                        s.cpu_pct += t.cpu_cost();
+                        s.queue_len -= 1;
+                    }
+                    *submitted.lock().unwrap() += 1;
+                    let _ = worker_tx.send((t, Instant::now()));
+                    sent_one = true;
+                }
+            }
+        }
+ 
+        if gen_done && io_queue.is_empty() && cpu_queue.is_empty() { break; }
+        if !sent_one {
+            let _ = release_rx.recv_timeout(Duration::from_millis(5));
+        }
+    }
 }
+ 
+ 
+// Monitor Thread
+ 
+fn run_monitor(
+    state: Arc<Mutex<SharedState>>,
+    stop: Arc<Mutex<bool>>,
+    wall_start: Instant,
+) -> Vec<(u64, usize, f64)> {
+    let mut log: Vec<(u64, usize, f64)> = Vec::new(); // (time_ms, active_workers, cpu_pct)
+    loop {
+        thread::sleep(Duration::from_millis(10));
+        let done = *stop.lock().unwrap();
+        let s = state.lock().unwrap();
+        log.push((wall_start.elapsed().as_millis() as u64, s.active_workers, s.cpu_pct));
+        if done { break; }
+    }
+    log
+}
+ 
+ 
 // Metrics and Printing
  
 fn print_summary(
     label: &str,
     completions: &[CompletionRecord],
-    worker_busy_ms: &[u64],
-    makespan_ms: u64,
-    last_finished_task_id: Option<u64>,
-    peak_available: usize,
-    num_workers: usize,
+    log: &[(u64, usize, f64)],
+    makespan_ms: u64
+
 ) {
     let total = completions.len();
+    let mut io_count  = 0usize;
+    let mut cpu_count = 0usize;
+ 
+    for r in completions {
+        match r.kind {
+            TaskKind::Io  => io_count  += 1,
+            TaskKind::Cpu => cpu_count += 1,
+        }
+    }
  
     let avg_wait = if total > 0 {
         completions.iter().map(|r| r.wait_ms).sum::<u64>() / total as u64
-    } else {
-        0
-    };
+    } else { 0 };
  
     let avg_turn = if total > 0 {
-        completions
-            .iter()
-            .map(|r| r.turnaround_ms)
-            .sum::<u64>()
-            / total as u64
-    } else {
-        0
-    };
+        completions.iter().map(|r| r.turnaround_ms).sum::<u64>() / total as u64
+    } else { 0 };
  
-    let max_wait = completions.iter().map(|r| r.wait_ms).max().unwrap_or(0);
+    let avg_cpu  = log.iter().map(|e| e.2).sum::<f64>() / log.len().max(1) as f64;
+    let peak_cpu = log.iter().map(|e| e.2 as u64).max().unwrap_or(0);
+    let avg_active = log.iter().map(|e| e.1 as f64).sum::<f64>() / log.len().max(1) as f64;
+
  
     println!();
     println!("---------------------------------------------------------");
-    println!(" RESULTS: {:<46}|", label);
+    println!(" RESULTS: {}", label);
     println!("---------------------------------------------------------");
-    println!("  Total tasks completed : {:>6}                       ", total);
-    println!(
-        "  Last task finished    : {:>6}                       ",
-        last_finished_task_id.unwrap_or(0)
-    );
-    println!("|  Makespan              : {:>6} ms                     |", makespan_ms);
-    println!("|  Avg wait time         : {:>6} ms                     |", avg_wait);
-    println!("|  Avg turnaround time   : {:>6} ms                     |", avg_turn);
-    println!("|  Max wait time         : {:>6} ms                     |", max_wait);
-    println!("|  Min available workers : {:>6} / {}                   |", peak_available, num_workers);
-    println!("|  Worker utilization:                                   |");
- 
-    for i in 0..num_workers {
-        let pct = if makespan_ms > 0 {
-            worker_busy_ms[i] * 100 / makespan_ms
-        } else {
-            0
-        };
- 
-        println!(
-            "|    Worker {:>2}  : {:>3}%                                   |",
-            i, pct
-        );
-    }
- 
+    println!("  Total tasks completed  : {}", total);
+    println!("  CPU tasks completed    : {}", cpu_count);
+    println!("  IO tasks completed     : {}", io_count);
+    println!("  Makespan               : {} ms", makespan_ms);
+    println!("  Avg wait time          : {} ms", avg_wait);
+    println!("  Avg turnaround time    : {} ms", avg_turn);
     println!("---------------------------------------------------------");
+    println!("  Monitor (sampled every 10ms):");
+    println!("  Avg CPU usage          : {:.1}%", avg_cpu);
+    println!("  Peak CPU usage         : {}%", peak_cpu);
+    println!("  Avg active workers     : {:.1} / 8", avg_active);
+    println!("---------------------------------------------------------");
+ 
+  
 }
+ 
  
 // Running one Experiment
  
-fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize) {
+fn run_experiment(label: &str, cfg: WorkloadConfig, num_workers: usize, optimized: bool) {
     println!();
-    println!("▶  Starting: {}", label);
+    println!("Starting: {}", label);
     println!(
-        "   Tasks: {}  |  Workers: {}  |  CPU fraction: {:.0}%  |  Burst: {}",
+        "   Tasks: {}  |  Workers: {}  |  IO fraction: {:.0}%  |  Scheduler: {}",
         cfg.num_tasks,
         num_workers,
-        cfg.cpu_fraction * 100.0,
-        cfg.burst_mode
+        cfg.io_fraction * 100.0,
+        if optimized { "Optimized" } else { "FIFO" }
     );
  
-    let pool = Arc::new(ThreadPool::new(num_workers));
+    let state = Arc::new(Mutex::new(SharedState::new()));
+    let stop  = Arc::new(Mutex::new(false));
+    let submitted: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
  
-    let (task_tx, task_rx) = mpsc::channel::<Task>();
-    let (done_tx, done_rx) = mpsc::channel::<CompletionRecord>();
+    let (task_tx,    task_rx)    = mpsc::channel::<Task>();
+    let (done_tx,    done_rx)    = mpsc::channel::<CompletionRecord>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (worker_tx,  worker_rx)  = mpsc::sync_channel::<(Task, Instant)>(32);
  
-    let submitted_count = Arc::new(AtomicU64::new(0));
+    let worker_rx = Arc::new(Mutex::new(worker_rx));
  
-    let active_workers_ref = Arc::clone(&pool.active_workers);
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let monitor_handle = thread::spawn(move || {
-        let mut min_available = num_workers;
-        loop {
-            let active = active_workers_ref.load(Ordering::SeqCst);
-            let available = num_workers.saturating_sub(active);
-            if available < min_available {
-                min_available = available;
-            }
-            if stop_rx.try_recv().is_ok() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        min_available
-    });
-
-    let dispatcher_handle = {
-        let pool = Arc::clone(&pool);
-        let done_tx = done_tx.clone();
-        let submitted = Arc::clone(&submitted_count);
-        thread::spawn(move || run_dispatcher(task_rx, pool, done_tx, submitted))
+    for id in 0..num_workers {
+        let rx  = Arc::clone(&worker_rx);
+        let dtx = done_tx.clone();
+        let st  = Arc::clone(&state);
+        let rel = release_tx.clone();
+        thread::spawn(move || worker_thread(id, rx, dtx, st, rel));
+    }
+    drop(done_tx); 
+ 
+  
+    let wall_start = Instant::now();
+    let mon_handle = {
+        let st   = Arc::clone(&state);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || run_monitor(st, stop, wall_start))
     };
  
+    
     let generator_handle = thread::spawn(move || generate_tasks(cfg, task_tx));
  
-    let wall_start = Instant::now();
+    
+    if optimized {
+        run_manager_optimized(task_rx, worker_tx, Arc::clone(&state), release_rx, num_workers, Arc::clone(&submitted));
+    } else {
+        run_manager_fifo(task_rx, worker_tx, Arc::clone(&state), release_rx, num_workers, Arc::clone(&submitted));
+    }
  
     generator_handle.join().unwrap();
-    dispatcher_handle.join().unwrap();
-
-    let _ = stop_tx.send(());
-    let peak_available = monitor_handle.join().unwrap();
-
  
-    drop(done_tx);
- 
-    let expected = submitted_count.load(Ordering::SeqCst);
-    let mut completions = Vec::with_capacity(expected as usize);
-    let mut worker_busy_ms = vec![0u64; pool.size()];
-    let mut last_finished_task_id = None;
- 
+    
+    let expected = *submitted.lock().unwrap();
+    let mut completions: Vec<CompletionRecord> = Vec::new();
     for _ in 0..expected {
-        let rec = done_rx.recv().unwrap();
-        worker_busy_ms[rec.worker_id] += rec.duration_ms;
-        last_finished_task_id = Some(rec.id);
-        completions.push(rec);
+        match done_rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(r)  => completions.push(r),
+            Err(_) => { eprintln!("timed out waiting for a worker"); break; }
+        }
     }
  
     let makespan_ms = wall_start.elapsed().as_millis() as u64;
  
-    print_summary(
-        label,
-        &completions,
-        &worker_busy_ms,
-        makespan_ms,
-        last_finished_task_id,
-        peak_available,
-        num_workers,
-    );
+ 
+    *stop.lock().unwrap() = true;
+    let log = mon_handle.join().unwrap();
+ 
+    print_summary(label, &completions, &log, makespan_ms);
 }
  
  
 fn main() {
-    println!("--------------------------------------------------------");
-    println!("  Final Project : Concurrent Task Dispatcher");
-    println!("  Architecture  : Central Dispatcher");
-    println!("  Policy        : FIFO - Simple, Fair, Starvation Free");
-    println!("  Workers       : 8");
-    println!("--------------------------------------------------------");
- 
-    // Experiment A
+
+    // Experiment A - FIFO, 70/30 IO/CPU
     run_experiment(
-        "A: Balanced Workload",
+        "A: FIFO, 70% IO / 30% CPU",
         WorkloadConfig {
-            num_tasks: 500,
+            num_tasks: 1000,
             seed: 42,
-            cpu_fraction: 0.50,
-            cpu_dur_min: 5,
-            cpu_dur_max: 30,
-            io_dur_min: 10,
-            io_dur_max: 40,
-            burst_mode: false,
-            max_arrival_gap_ms: 3,
+            io_fraction: 0.70,
+            arrival_gap_ms: 20,
         },
         8,
+        false,
     );
- 
-    // Experiment B
+
+        // Experiment B - Optimized, 70/30 IO/CPU
     run_experiment(
-        "B: Stressed Workload",
+        ": Optimized, 70% IO / 30% CPU",
         WorkloadConfig {
-            num_tasks: 600,
-            seed: 99,
-            cpu_fraction: 0.80,
-            cpu_dur_min: 20,
-            cpu_dur_max: 80,
-            io_dur_min: 2,
-            io_dur_max: 10,
-            burst_mode: true,
-            max_arrival_gap_ms: 20,
+            num_tasks: 1000,
+            seed: 42,
+            io_fraction: 0.70,
+            arrival_gap_ms: 20,
         },
         8,
+        true,
     );
- 
+
+    println!();
     println!("All experiments complete.");
 }
- 
